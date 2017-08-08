@@ -21,6 +21,7 @@ import (
 	// TODO: Migrate kubelet to either use its own internal objects or client library.
 	"k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/apis/componentconfig"
+	pluginapi "k8s.io/kubernetes/pkg/kubelet/apis/device-plugin/v1alpha1"
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
 
 	"fmt"
@@ -66,6 +67,17 @@ type ContainerManager interface {
 	// UpdateQOSCgroups performs housekeeping updates to ensure that the top
 	// level QoS containers have their desired state in a thread-safe way
 	UpdateQOSCgroups() error
+
+	// SetDevicePluginHandler sets the device plugin handler as
+	// it needs kubelet level information at initialization
+	SetDevicePluginHandler(DevicePluginHandler)
+
+	// GetDevicePluginHandler returns the DevicePluginHandler
+	GetDevicePluginHandler() DevicePluginHandler
+}
+
+type DevicePluginHandler interface {
+	Devices() map[string][]*pluginapi.Device
 }
 
 type NodeConfig struct {
