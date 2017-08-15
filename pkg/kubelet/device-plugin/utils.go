@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	"k8s.io/api/core/v1"
 	pluginapi "k8s.io/kubernetes/pkg/kubelet/apis/device-plugin/v1alpha1"
 )
 
@@ -71,4 +72,9 @@ func IsResourceNameValid(resourceName string) error {
 
 func DeviceKey(d *pluginapi.Device) string {
 	return d.ID
+}
+
+// Returns whether the ResourceName points to a device plugin name.
+func IsDeviceName(k v1.ResourceName) bool {
+	return strings.HasPrefix(string(k), v1.ResourceOpaqueIntPrefix)
 }

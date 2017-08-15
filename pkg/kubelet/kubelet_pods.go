@@ -89,22 +89,83 @@ func (kl *Kubelet) GetActivePods() []*v1.Pod {
 
 // makeDevices determines the devices for the given container.
 // Experimental.
-func (kl *Kubelet) makeDevices(pod *v1.Pod, container *v1.Container) ([]kubecontainer.DeviceInfo, error) {
-	if container.Resources.Limits.NvidiaGPU().IsZero() {
-		return nil, nil
-	}
-
-	nvidiaGPUPaths, err := kl.gpuManager.AllocateGPU(pod, container)
-	if err != nil {
-		return nil, err
-	}
+func (kl *Kubelet) makeDevices(pod *v1.Pod, container *v1.Container) ([]kubecontainer.DeviceInfo, []kubecontainer.Mount, []kubecontainer.EnvVar, error) {
 	var devices []kubecontainer.DeviceInfo
-	for _, path := range nvidiaGPUPaths {
-		// Devices have to be mapped one to one because of nvidia CUDA library requirements.
-		devices = append(devices, kubecontainer.DeviceInfo{PathOnHost: path, PathInContainer: path, Permissions: "mrw"})
+	if !container.Resources.Limits.NvidiaGPU().IsZero() {
+		nvidiaGPUPaths, err := kl.gpuManager.AllocateGPU(pod, container)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, path := range nvidiaGPUPaths {
+			// Devices have to be mapped one to one because of nvidia CUDA library requirements.
+			devices = append(devices, kubecontainer.DeviceInfo{PathOnHost: path, PathInContainer: path, Permissions: "mrw"})
+		}
 	}
 
-	return devices, nil
+	// Gets devices, mounts, and envs from device plugin handler.
+	hdlr := kl.containerManager.GetDevicePluginHandler()
+	if hdlr == nil {
+		return devices, nil, nil, nil
+	}
+	glog.V(3).Infof("makeDevices calling device plugin handler")
+
+	var mounts []kubecontainer.Mount
+	var envs []kubecontainer.EnvVar
+	devsMap := make(map[string]string)
+	mountsMap := make(map[string]string)
+	envsMap := make(map[string]string)
+	allocResps, err := hdlr.Allocate(pod, container, kl.GetActivePods())
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, resp := range allocResps {
+		for _, devRuntime := range resp.Spec {
+			for _, dev := range devRuntime.Devices {
+				if d, ok := devsMap[dev.ContainerPath]; ok {
+					glog.V(3).Infof("skip existing device %s %s", dev.ContainerPath, dev.HostPath)
+					if (d != dev.HostPath) {
+						glog.Errorf("Container device %s has conflicting mapping host devices: %s and %s",
+							dev.ContainerPath, d, dev.HostPath)
+					}
+					continue
+				}
+				devices = append(devices, kubecontainer.DeviceInfo{
+					PathOnHost:		dev.HostPath,
+					PathInContainer:	dev.ContainerPath,
+					Permissions:		dev.Permissions,
+				})
+			}
+			for _, mount := range devRuntime.Mounts {
+				if m, ok := mountsMap[mount.MountPath]; ok {
+					glog.V(3).Infof("skip existing mount %s %s", mount.MountPath, mount.HostPath)
+					if (m != mount.HostPath) {
+						glog.Errorf("Container mount %s has conflicting mapping host mounts: %s and %s",
+							mount.MountPath, m, mount.HostPath)
+					}
+					continue
+				}
+				mounts = append(mounts, kubecontainer.Mount{
+					Name:           mount.MountPath,
+					ContainerPath:  mount.MountPath,
+					HostPath:       mount.HostPath,
+					ReadOnly:       mount.ReadOnly,
+					SELinuxRelabel: false,
+				})
+			}
+			for k, v := range devRuntime.Envs {
+				if e, ok := envsMap[k]; ok {
+					glog.V(3).Infof("skip existing envs %s %s", k, v)
+					if (e != v) {
+						glog.Errorf("Environment variable %s has conflicting setting: %s and %s", k, e, v)
+					}
+					continue
+				}
+				envs = append(envs, kubecontainer.EnvVar{Name: k, Value: v})
+			}
+		}
+	}
+
+	return devices, mounts, envs, nil
 }
 
 // makeMounts determines the mount points for the given container.
@@ -325,19 +386,22 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *v1.Pod, container *v1.Contai
 
 	opts.PortMappings = kubecontainer.MakePortMappings(container)
 	// TODO(random-liu): Move following convert functions into pkg/kubelet/container
-	opts.Devices, err = kl.makeDevices(pod, container)
+	opts.Devices, opts.Mounts, opts.Envs, err = kl.makeDevices(pod, container)
 	if err != nil {
 		return nil, false, err
 	}
 
-	opts.Mounts, err = makeMounts(pod, kl.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, volumes)
+	mounts, err := makeMounts(pod, kl.getPodDir(pod.UID), container, hostname, hostDomainName, podIP, volumes)
 	if err != nil {
 		return nil, false, err
 	}
-	opts.Envs, err = kl.makeEnvironmentVariables(pod, container, podIP)
+	opts.Mounts = append(opts.Mounts, mounts...)
+
+	envs, err := kl.makeEnvironmentVariables(pod, container, podIP)
 	if err != nil {
 		return nil, false, err
 	}
+	opts.Envs = append(opts.Envs, envs...)
 
 	// Disabling adding TerminationMessagePath on Windows as these files would be mounted as docker volume and
 	// Docker for Windows has a bug where only directories can be mounted

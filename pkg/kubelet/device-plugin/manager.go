@@ -94,9 +94,9 @@ func (m *ManagerImpl) Devices() map[string][]*pluginapi.Device {
 	return devs
 }
 
+
 // Allocate is the call that you can use to allocate a set of Devices
-func (m *ManagerImpl) Allocate(resourceName string,
-	devs []*pluginapi.Device) (*pluginapi.AllocateResponse, error) {
+func (m *ManagerImpl) Allocate(resourceName string, devs []string) (*pluginapi.AllocateResponse, error) {
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
@@ -132,10 +132,12 @@ func (m *ManagerImpl) Register(ctx context.Context,
 
 	// TODO check for conflicting labels
 
+/*
 	if _, ok := m.Endpoints[r.ResourceName]; ok {
 		return &pluginapi.Empty{},
 			fmt.Errorf(pluginapi.ErrDevicePluginAlreadyExists)
 	}
+*/
 
 	go m.addEndpoint(r)
 

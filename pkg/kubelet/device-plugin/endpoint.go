@@ -49,6 +49,7 @@ func newEndpoint(socketPath, resourceName string,
 
 	client, err := dial(socketPath)
 	if err != nil {
+		glog.Errorf("Can't new endpoint with path %s err %v", socketPath, err)
 		return nil, err
 	}
 
@@ -143,14 +144,9 @@ func (e *endpoint) ListWatch(stream pluginapi.DevicePlugin_ListAndWatchClient) {
 
 }
 
-func (e *endpoint) allocate(devs []*pluginapi.Device) (*pluginapi.AllocateResponse, error) {
-	var ids []string
-	for _, d := range devs {
-		ids = append(ids, d.ID)
-	}
-
+func (e *endpoint) allocate(devs []string) (*pluginapi.AllocateResponse, error) {
 	return e.client.Allocate(context.Background(), &pluginapi.AllocateRequest{
-		DevicesIDs: ids,
+		DevicesIDs: devs,
 	})
 }
 

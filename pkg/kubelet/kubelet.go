@@ -722,7 +722,7 @@ func NewMainKubelet(kubeCfg *componentconfig.KubeletConfiguration, kubeDeps *Dep
 		return nil, err
 	}
 
-	devicePluginHdlr, err := cm.NewDevicePluginHandler()
+	devicePluginHdlr, err := cm.NewDevicePluginHandlerImpl()
 	if err != nil {
 		return nil, err
 	}

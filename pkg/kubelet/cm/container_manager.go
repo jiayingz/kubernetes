@@ -78,6 +78,8 @@ type ContainerManager interface {
 
 type DevicePluginHandler interface {
 	Devices() map[string][]*pluginapi.Device
+	// The third parameter is the list of active pods.
+	Allocate(*v1.Pod, *v1.Container, []*v1.Pod) ([]*pluginapi.AllocateResponse, error)
 }
 
 type NodeConfig struct {
