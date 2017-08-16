@@ -1,0 +1,64 @@
+apiVersion: extensions/v1beta1
+kind: DaemonSet
+metadata:
+    name: nvidia-device-plugin
+    namespace: kube-system
+spec:
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin
+        # Update the version tag here and `LAKITU_KERNEL_SHA1` while using against new COS releases.
+        cos-version: cos-beta-59-9460-20-0
+    spec:
+      hostNetwork: true
+      hostPID: true
+      volumes:
+      - name: device-plugin
+        hostPath:
+          path: /var/lib/kubelet/device-plugins
+      - name: dev
+        hostPath:
+          path: /dev
+      - name: nvidia-overlay
+        hostPath:
+          path: /home/kubernetes/bin/nvidia
+      - name: os-release
+        hostPath:
+          path: /etc/os-release
+      - name: sysrq
+        hostPath:
+          path: /proc/sysrq-trigger
+      containers:
+      - image: "gcr.io/jiayingz-gke-dev/device-plugin-gpu:v0.3"
+        imagePullPolicy: Always
+        command: ["/usr/bin/device_plugins"]
+        #command: ["/bin/sh", "-c"]
+        #args: ["sleep infinity"]
+        env:
+          - name: BASE_DIR
+            value: "/rootfs/nvidia"
+        name: nvidia-driver-installer
+        resources:
+          requests:
+            cpu: 0.15
+        securityContext:
+          privileged: true
+        env:
+          # The kernel SHA1 here should correspond to the GCI_VERSION specified by default under cluster/gce/config-default.sh 
+          - name: LAKITU_KERNEL_SHA1
+            value: 26481563cb3788ad254c2bf2126b843c161c7e48
+          - name: BASE_DIR
+            value: "/rootfs/nvidia"
+        volumeMounts:
+        - name: device-plugin
+          mountPath: /device-plugin
+        - name: nvidia-overlay
+          mountPath: /rootfs/nvidia
+        - name: dev
+          mountPath: /dev
+        - name: os-release
+          mountPath: /rootfs/etc/os-release
+        - name: sysrq
+          mountPath: /sysrq
+
