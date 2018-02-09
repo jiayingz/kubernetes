@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -40,13 +41,49 @@ import (
 )
 
 const (
-	socketName       = "/tmp/device_plugin/server.sock"
-	pluginSocketName = "/tmp/device_plugin/device-plugin.sock"
+	testDirPrefix    = "device_plugin_test"
+	socketName       = "server.sock"
+	pluginSocketName = "device-plugin.sock"
 	testResourceName = "fake-domain/resource"
 )
 
+func getTestDir(t *testing.T) string {
+	as := assert.New(t)
+	tmpDir, err := ioutil.TempDir("", testDirPrefix)
+	as.Nil(err)
+	return tmpDir
+}
+
+func setup(t *testing.T, devs []*pluginapi.Device, callback monitorCallback) (*ManagerImpl, *Stub) {
+	tmpDir := getTestDir(t)
+	socketPath := path.Join(tmpDir, socketName)
+	pluginSocketPath := path.Join(tmpDir, pluginSocketName)
+
+	m, err := newManagerImpl(socketPath)
+	require.NoError(t, err)
+
+	m.callback = callback
+
+	activePods := func() []*v1.Pod {
+		return []*v1.Pod{}
+	}
+	err = m.Start(activePods, &sourcesReadyStub{})
+	require.NoError(t, err)
+
+	p := NewDevicePluginStub(devs, pluginSocketPath)
+	err = p.Start()
+	require.NoError(t, err)
+
+	return m, p
+}
+
+func cleanup(t *testing.T, m *ManagerImpl, p *Stub) {
+	p.Stop()
+	m.Stop()
+}
+
 func TestNewManagerImpl(t *testing.T) {
-	_, err := newManagerImpl(socketName)
+	_, err := newManagerImpl(path.Join(getTestDir(t), socketName))
 	require.NoError(t, err)
 }
 
@@ -79,18 +116,18 @@ func TestDevicePluginReRegistration(t *testing.T) {
 	}
 	m, p1 := setup(t, devs, callback)
 	atomic.StoreInt32(&expCallbackCount, 1)
-	p1.Register(socketName, testResourceName)
+	p1.Register(path.Join(m.socketdir, m.socketname), testResourceName)
 	// Wait for the first callback to be issued.
 
 	<-callbackChan
 	devices := m.Devices()
 	require.Equal(t, 2, len(devices[testResourceName]), "Devices are not updated.")
 
-	p2 := NewDevicePluginStub(devs, pluginSocketName+".new")
+	p2 := NewDevicePluginStub(devs, path.Join(m.socketdir, pluginSocketName+".new"))
 	err := p2.Start()
 	require.NoError(t, err)
 	atomic.StoreInt32(&expCallbackCount, 2)
-	p2.Register(socketName, testResourceName)
+	p2.Register(path.Join(m.socketdir, m.socketname), testResourceName)
 	// Wait for the second callback to be issued.
 	<-callbackChan
 
@@ -98,11 +135,11 @@ func TestDevicePluginReRegistration(t *testing.T) {
 	require.Equal(t, 2, len(devices2[testResourceName]), "Devices shouldn't change.")
 
 	// Test the scenario that a plugin re-registers with different devices.
-	p3 := NewDevicePluginStub(devsForRegistration, pluginSocketName+".third")
+	p3 := NewDevicePluginStub(devsForRegistration, path.Join(m.socketdir, pluginSocketName+".third"))
 	err = p3.Start()
 	require.NoError(t, err)
 	atomic.StoreInt32(&expCallbackCount, 3)
-	p3.Register(socketName, testResourceName)
+	p3.Register(path.Join(m.socketdir, m.socketname), testResourceName)
 	// Wait for the second callback to be issued.
 	<-callbackChan
 
@@ -114,32 +151,8 @@ func TestDevicePluginReRegistration(t *testing.T) {
 	close(callbackChan)
 }
 
-func setup(t *testing.T, devs []*pluginapi.Device, callback monitorCallback) (Manager, *Stub) {
-	m, err := newManagerImpl(socketName)
-	require.NoError(t, err)
-
-	m.callback = callback
-
-	activePods := func() []*v1.Pod {
-		return []*v1.Pod{}
-	}
-	err = m.Start(activePods, &sourcesReadyStub{})
-	require.NoError(t, err)
-
-	p := NewDevicePluginStub(devs, pluginSocketName)
-	err = p.Start()
-	require.NoError(t, err)
-
-	return m, p
-}
-
-func cleanup(t *testing.T, m Manager, p *Stub) {
-	p.Stop()
-	m.Stop()
-}
-
 func TestUpdateCapacityAllocatable(t *testing.T) {
-	testManager, err := newManagerImpl(socketName)
+	testManager, err := newManagerImpl(path.Join(getTestDir(t), socketName))
 	as := assert.New(t)
 	as.NotNil(testManager)
 	as.Nil(err)
@@ -509,11 +522,9 @@ func TestPodContainerDeviceAllocation(t *testing.T) {
 	podsStub := activePodsStub{
 		activePods: []*v1.Pod{},
 	}
-	tmpDir, err := ioutil.TempDir("", "checkpoint")
-	as.Nil(err)
-	defer os.RemoveAll(tmpDir)
 	nodeInfo := getTestNodeInfo(v1.ResourceList{})
-	testManager := getTestManager(tmpDir, podsStub.getActivePods, testResources)
+	testManager := getTestManager(getTestDir(t), podsStub.getActivePods, testResources)
+	defer os.RemoveAll(testManager.socketdir)
 
 	testPods := []*v1.Pod{
 		makePod(v1.ResourceList{
@@ -603,10 +614,8 @@ func TestInitContainerDeviceAllocation(t *testing.T) {
 		activePods: []*v1.Pod{},
 	}
 	nodeInfo := getTestNodeInfo(v1.ResourceList{})
-	tmpDir, err := ioutil.TempDir("", "checkpoint")
-	as.Nil(err)
-	defer os.RemoveAll(tmpDir)
-	testManager := getTestManager(tmpDir, podsStub.getActivePods, testResources)
+	testManager := getTestManager(getTestDir(t), podsStub.getActivePods, testResources)
+	defer os.RemoveAll(testManager.socketdir)
 
 	podWithPluginResourcesInInitContainers := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -654,7 +663,7 @@ func TestInitContainerDeviceAllocation(t *testing.T) {
 		},
 	}
 	podsStub.updateActivePods([]*v1.Pod{podWithPluginResourcesInInitContainers})
-	err = testManager.Allocate(nodeInfo, &lifecycle.PodAdmitAttributes{Pod: podWithPluginResourcesInInitContainers})
+	err := testManager.Allocate(nodeInfo, &lifecycle.PodAdmitAttributes{Pod: podWithPluginResourcesInInitContainers})
 	as.Nil(err)
 	podUID := string(podWithPluginResourcesInInitContainers.UID)
 	initCont1 := podWithPluginResourcesInInitContainers.Spec.InitContainers[0].Name

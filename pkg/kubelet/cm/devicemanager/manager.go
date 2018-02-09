@@ -316,6 +316,7 @@ func (m *ManagerImpl) Stop() error {
 	}
 
 	m.server.Stop()
+	os.RemoveAll(m.socketdir)
 	return nil
 }
 
