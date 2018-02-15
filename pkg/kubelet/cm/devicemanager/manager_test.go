@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -34,7 +35,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	pluginapi "k8s.io/kubernetes/pkg/kubelet/apis/deviceplugin/v1alpha"
+	watcherapi "k8s.io/kubernetes/pkg/kubelet/apis/pluginregistration/v1alpha"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
+	"k8s.io/kubernetes/pkg/kubelet/util/pluginwatcher"
 	utilstore "k8s.io/kubernetes/pkg/kubelet/util/store"
 	"k8s.io/kubernetes/pkg/scheduler/schedulercache"
 	utilfs "k8s.io/kubernetes/pkg/util/filesystem"
@@ -67,7 +70,15 @@ func TestNewManagerImplStart(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(socketDir)
 	m, p := setup(t, []*pluginapi.Device{}, func(n string, a, u, r []pluginapi.Device) {}, socketName, pluginSocketName)
-	cleanup(t, m, p)
+	cleanup(t, m, p, nil)
+}
+
+func TestNewManagerImplStartProbeMode(t *testing.T) {
+	socketDir, socketName, pluginSocketName, err := tmpSocketDir()
+	require.NoError(t, err)
+	defer os.RemoveAll(socketDir)
+	m, p, w := setupInProbeMode(t, []*pluginapi.Device{}, func(n string, a, u, r []pluginapi.Device) {}, socketName, pluginSocketName)
+	cleanup(t, m, p, w)
 }
 
 // Tests that the device plugin manager correctly handles registration and re-registration by
@@ -109,7 +120,7 @@ func TestDevicePluginReRegistration(t *testing.T) {
 	devices := m.Devices()
 	require.Equal(t, 2, len(devices[testResourceName]), "Devices are not updated.")
 
-	p2 := NewDevicePluginStub(devs, pluginSocketName+".new")
+	p2 := NewDevicePluginStub(devs, pluginSocketName+".new", testResourceName)
 	err = p2.Start()
 	require.NoError(t, err)
 	atomic.StoreInt32(&expCallbackCount, 2)
@@ -126,7 +137,7 @@ func TestDevicePluginReRegistration(t *testing.T) {
 	require.Equal(t, 2, len(devices2[testResourceName]), "Devices shouldn't change.")
 
 	// Test the scenario that a plugin re-registers with different devices.
-	p3 := NewDevicePluginStub(devsForRegistration, pluginSocketName+".third")
+	p3 := NewDevicePluginStub(devsForRegistration, pluginSocketName+".third", testResourceName)
 	err = p3.Start()
 	require.NoError(t, err)
 	atomic.StoreInt32(&expCallbackCount, 3)
@@ -143,7 +154,85 @@ func TestDevicePluginReRegistration(t *testing.T) {
 	require.Equal(t, 1, len(devices3[testResourceName]), "Devices of plugin previously registered should be removed.")
 	p2.Stop()
 	p3.Stop()
-	cleanup(t, m, p1)
+	cleanup(t, m, p1, nil)
+	close(callbackChan)
+}
+
+// Tests that the device plugin manager correctly handles registration and re-registration by
+// making sure that after registration, devices are correctly updated and if a re-registration
+// happens, we will NOT delete devices; and no orphaned devices left.
+// While testing above scenario, plugin discovery and registration will be done using
+// Kubelet probe based mechanism
+func TestDevicePluginReRegistrationProbeMode(t *testing.T) {
+	socketDir, socketName, pluginSocketName, err := tmpSocketDir()
+	require.NoError(t, err)
+	defer os.RemoveAll(socketDir)
+	devs := []*pluginapi.Device{
+		{ID: "Dev1", Health: pluginapi.Healthy},
+		{ID: "Dev2", Health: pluginapi.Healthy},
+	}
+	devsForRegistration := []*pluginapi.Device{
+		{ID: "Dev3", Health: pluginapi.Healthy},
+	}
+
+	expCallbackCount := int32(0)
+	callbackCount := int32(0)
+	callbackChan := make(chan int32)
+	callback := func(n string, a, u, r []pluginapi.Device) {
+		callbackCount++
+		if callbackCount > atomic.LoadInt32(&expCallbackCount) {
+			t.FailNow()
+		}
+		callbackChan <- callbackCount
+	}
+	m, p1, w := setupInProbeMode(t, devs, callback, socketName, pluginSocketName)
+	atomic.StoreInt32(&expCallbackCount, 1)
+	//p1.Register(socketName, testResourceName)
+	// Wait for the first callback to be issued.
+	select {
+	case <-callbackChan:
+		break
+	case <-time.After(time.Second):
+		t.FailNow()
+	}
+	devices := m.Devices()
+	require.Equal(t, 2, len(devices[testResourceName]), "Devices are not updated.")
+
+	p2 := NewDevicePluginStub(devs, pluginSocketName+".new", testResourceName)
+	err = p2.Start()
+	require.NoError(t, err)
+	atomic.StoreInt32(&expCallbackCount, 2)
+	//p2.Register(socketName, testResourceName)
+	// Wait for the second callback to be issued.
+	select {
+	case <-callbackChan:
+		break
+	case <-time.After(time.Second):
+		t.FailNow()
+	}
+
+	devices2 := m.Devices()
+	require.Equal(t, 2, len(devices2[testResourceName]), "Devices shouldn't change.")
+
+	// Test the scenario that a plugin re-registers with different devices.
+	p3 := NewDevicePluginStub(devsForRegistration, pluginSocketName+".third", testResourceName)
+	err = p3.Start()
+	require.NoError(t, err)
+	atomic.StoreInt32(&expCallbackCount, 3)
+	//p3.Register(socketName, testResourceName)
+	// Wait for the second callback to be issued.
+	select {
+	case <-callbackChan:
+		break
+	case <-time.After(time.Second):
+		t.FailNow()
+	}
+
+	devices3 := m.Devices()
+	require.Equal(t, 1, len(devices3[testResourceName]), "Devices of plugin previously registered should be removed.")
+	p2.Stop()
+	p3.Stop()
+	cleanup(t, m, p1, w)
 	close(callbackChan)
 }
 
@@ -159,16 +248,44 @@ func setup(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, soc
 	err = m.Start(activePods, &sourcesReadyStub{})
 	require.NoError(t, err)
 
-	p := NewDevicePluginStub(devs, pluginSocketName)
+	p := NewDevicePluginStub(devs, pluginSocketName, testResourceName)
 	err = p.Start()
 	require.NoError(t, err)
 
 	return m, p
 }
 
-func cleanup(t *testing.T, m Manager, p *Stub) {
+func setupInProbeMode(t *testing.T, devs []*pluginapi.Device, callback monitorCallback, socketName string, pluginSocketName string) (Manager, *Stub, *pluginwatcher.Watcher) {
+	w := pluginwatcher.NewWatcher(filepath.Dir(pluginSocketName))
+
+	m, err := newManagerImpl(socketName)
+	require.NoError(t, err)
+
+	w.AddHandler(watcherapi.DevicePlugin, m.GetWatcherCallback())
+	w.Start()
+
+	m.callback = callback
+
+	activePods := func() []*v1.Pod {
+		return []*v1.Pod{}
+	}
+	err = m.Start(activePods, &sourcesReadyStub{})
+	require.NoError(t, err)
+
+	p := NewDevicePluginStub(devs, pluginSocketName, testResourceName)
+	err = p.Start()
+	require.NoError(t, err)
+
+	return m, p, &w
+}
+
+func cleanup(t *testing.T, m Manager, p *Stub, w *pluginwatcher.Watcher) {
 	p.Stop()
 	m.Stop()
+	if w != nil {
+		err := w.Stop()
+		require.NoError(t, err)
+	}
 }
 
 func TestUpdateCapacityAllocatable(t *testing.T) {

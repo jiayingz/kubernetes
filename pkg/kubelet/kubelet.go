@@ -58,6 +58,7 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 	internalapi "k8s.io/kubernetes/pkg/kubelet/apis/cri"
 	kubeletconfiginternal "k8s.io/kubernetes/pkg/kubelet/apis/kubeletconfig"
+	pluginwatcherapi "k8s.io/kubernetes/pkg/kubelet/apis/pluginregistration/v1alpha"
 	"k8s.io/kubernetes/pkg/kubelet/cadvisor"
 	kubeletcertificate "k8s.io/kubernetes/pkg/kubelet/certificate"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
@@ -93,6 +94,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/sysctl"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
+	"k8s.io/kubernetes/pkg/kubelet/util/pluginwatcher"
 	"k8s.io/kubernetes/pkg/kubelet/util/queue"
 	"k8s.io/kubernetes/pkg/kubelet/util/sliceutils"
 	"k8s.io/kubernetes/pkg/kubelet/volumemanager"
@@ -799,6 +801,8 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 		return nil, err
 	}
 
+	klet.pluginWatcher = pluginwatcher.NewWatcher(pluginwatcherapi.PluginsSockDir)
+
 	// If the experimentalMounterPathFlag is set, we do not want to
 	// check node capabilities since the mount path is not the default
 	if len(experimentalMounterPath) != 0 {
@@ -1179,6 +1183,8 @@ type Kubelet struct {
 	// This flag, if set, instructs the kubelet to keep volumes from terminated pods mounted to the node.
 	// This can be useful for debugging volume related issues.
 	keepTerminatedPodVolumes bool // DEPRECATED
+
+	pluginWatcher pluginwatcher.Watcher
 }
 
 func allLocalIPsWithoutLoopback() ([]net.IP, error) {
@@ -1299,8 +1305,15 @@ func (kl *Kubelet) initializeModules() error {
 		return fmt.Errorf("Kubelet failed to get node info: %v", err)
 	}
 
-	if err := kl.containerManager.Start(node, kl.GetActivePods, kl.sourcesReady, kl.statusManager, kl.runtimeService); err != nil {
+	if err := kl.containerManager.Start(node, kl.GetActivePods, kl.sourcesReady,
+		kl.statusManager, kl.runtimeService); err != nil {
 		return fmt.Errorf("Failed to start ContainerManager %v", err)
+	}
+
+	kl.pluginWatcher.AddHandler(pluginwatcherapi.DevicePlugin, kl.containerManager.GetPluginRegistrationHandlerCbkFunc())
+
+	if err := kl.pluginWatcher.Start(); err != nil {
+		return fmt.Errorf("failed to start Plugin Watcher. err: %v", err)
 	}
 
 	// Start out of memory watcher.

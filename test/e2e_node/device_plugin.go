@@ -34,6 +34,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	pluginapi "k8s.io/kubernetes/pkg/kubelet/apis/deviceplugin/v1alpha"
+	watcherapi "k8s.io/kubernetes/pkg/kubelet/apis/pluginregistration/v1alpha"
 	dm "k8s.io/kubernetes/pkg/kubelet/cm/devicemanager"
 
 	. "github.com/onsi/ginkgo"
@@ -42,7 +43,8 @@ import (
 
 const (
 	// fake resource name
-	resourceName = "fake.com/resource"
+	resourceName                 = "fake.com/resource"
+	resourceNameWithProbeSupport = "fake.com/resource2"
 )
 
 // Serial because the test restarts Kubelet
@@ -69,7 +71,7 @@ var _ = framework.KubeDescribe("Device Plugin [Feature:DevicePlugin] [Serial] [D
 
 			socketPath := pluginapi.DevicePluginPath + "dp." + fmt.Sprintf("%d", time.Now().Unix())
 
-			dp1 := dm.NewDevicePluginStub(devs, socketPath)
+			dp1 := dm.NewDevicePluginStub(devs, socketPath, resourceName)
 			dp1.SetAllocFunc(stubAllocFunc)
 			err := dp1.Start()
 			framework.ExpectNoError(err)
@@ -107,7 +109,7 @@ var _ = framework.KubeDescribe("Device Plugin [Feature:DevicePlugin] [Serial] [D
 			framework.WaitForAllNodesSchedulable(f.ClientSet, framework.TestContext.NodeSchedulableTimeout)
 
 			By("Re-Register resources")
-			dp1 = dm.NewDevicePluginStub(devs, socketPath)
+			dp1 = dm.NewDevicePluginStub(devs, socketPath, resourceName)
 			dp1.SetAllocFunc(stubAllocFunc)
 			err = dp1.Start()
 			framework.ExpectNoError(err)
@@ -160,6 +162,112 @@ var _ = framework.KubeDescribe("Device Plugin [Feature:DevicePlugin] [Serial] [D
 			f.PodClient().DeleteSync(pod1.Name, &metav1.DeleteOptions{}, framework.DefaultPodDeletionTimeout)
 			f.PodClient().DeleteSync(pod2.Name, &metav1.DeleteOptions{}, framework.DefaultPodDeletionTimeout)
 		})
+		It("Verifies the Kubelet device plugin functionality with Probe-Mode plugin discovery mechanism", func() {
+
+			By("Wait for node is ready")
+			framework.WaitForAllNodesSchedulable(f.ClientSet, framework.TestContext.NodeSchedulableTimeout)
+
+			By("Start stub device plugin")
+			// fake devices for e2e test
+			devs := []*pluginapi.Device{
+				{ID: "Dev-1", Health: pluginapi.Healthy},
+				{ID: "Dev-2", Health: pluginapi.Healthy},
+			}
+
+			socketPath := watcherapi.PluginsSockDir + "dp." + fmt.Sprintf("%d", time.Now().Unix())
+
+			dp1 := dm.NewDevicePluginStub(devs, socketPath, resourceName)
+			dp1.SetAllocFunc(stubAllocFunc)
+			err := dp1.Start()
+			framework.ExpectNoError(err)
+
+			//By("Register resources")
+			//err = dp1.Register(pluginapi.KubeletSocket, resourceName)
+			//framework.ExpectNoError(err)
+
+			By("Waiting for the resource exported by the stub device plugin to become available on the local node")
+			devsLen := int64(len(devs))
+			Eventually(func() int64 {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				return numberOfDevices(node, resourceName)
+			}, 30*time.Second, framework.Poll).Should(Equal(devsLen))
+
+			By("Creating one pod on node with at least one fake-device")
+			podRECMD := "devs=$(ls /tmp/ | egrep '^Dev-[0-9]+$') && echo stub devices: $devs"
+			pod1 := f.PodClient().CreateSync(makeBusyboxPod(resourceName, podRECMD))
+			deviceIDRE := "stub devices: (Dev-[0-9]+)"
+			count1, devId1 := parseLogFromNRuns(f, pod1.Name, pod1.Name, 0, deviceIDRE)
+			Expect(devId1).To(Not(Equal("")))
+
+			pod1, err = f.PodClient().Get(pod1.Name, metav1.GetOptions{})
+			framework.ExpectNoError(err)
+
+			By("Restarting Kubelet and waiting for the current running pod to restart")
+			restartKubelet()
+
+			By("Confirming that after a kubelet and pod restart, fake-device assignement is kept")
+			count1, devIdRestart1 := parseLogFromNRuns(f, pod1.Name, pod1.Name, count1+1, deviceIDRE)
+			Expect(devIdRestart1).To(Equal(devId1))
+
+			By("Wait for node is ready")
+			framework.WaitForAllNodesSchedulable(f.ClientSet, framework.TestContext.NodeSchedulableTimeout)
+
+			By("Re-Register resources")
+			dp1 = dm.NewDevicePluginStub(devs, socketPath, resourceName)
+			dp1.SetAllocFunc(stubAllocFunc)
+			err = dp1.Start()
+			framework.ExpectNoError(err)
+
+			//err = dp1.Register(pluginapi.KubeletSocket, resourceName)
+			//framework.ExpectNoError(err)
+
+			By("Waiting for resource to become available on the local node after re-registration")
+			Eventually(func() int64 {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				return numberOfDevices(node, resourceName)
+			}, 30*time.Second, framework.Poll).Should(Equal(devsLen))
+
+			By("Creating another pod")
+			pod2 := f.PodClient().CreateSync(makeBusyboxPod(resourceName, podRECMD))
+
+			By("Checking that pods got a different GPU")
+			count2, devId2 := parseLogFromNRuns(f, pod2.Name, pod2.Name, 1, deviceIDRE)
+
+			Expect(devId1).To(Not(Equal(devId2)))
+
+			By("Deleting device plugin.")
+			err = dp1.Stop()
+			framework.ExpectNoError(err)
+
+			By("Waiting for stub device plugin to become unavailable on the local node")
+			Eventually(func() bool {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				return numberOfDevices(node, resourceName) <= 0
+			}, 10*time.Minute, framework.Poll).Should(BeTrue())
+
+			By("Checking that scheduled pods can continue to run even after we delete device plugin.")
+			count1, devIdRestart1 = parseLogFromNRuns(f, pod1.Name, pod1.Name, count1+1, deviceIDRE)
+			Expect(devIdRestart1).To(Equal(devId1))
+			count2, devIdRestart2 := parseLogFromNRuns(f, pod2.Name, pod2.Name, count2+1, deviceIDRE)
+			Expect(devIdRestart2).To(Equal(devId2))
+
+			By("Restarting Kubelet.")
+			restartKubelet()
+
+			By("Checking that scheduled pods can continue to run even after we delete device plugin and restart Kubelet.")
+			count1, devIdRestart1 = parseLogFromNRuns(f, pod1.Name, pod1.Name, count1+2, deviceIDRE)
+			Expect(devIdRestart1).To(Equal(devId1))
+			count2, devIdRestart2 = parseLogFromNRuns(f, pod2.Name, pod2.Name, count2+2, deviceIDRE)
+			Expect(devIdRestart2).To(Equal(devId2))
+
+			// Cleanup
+			f.PodClient().DeleteSync(pod1.Name, &metav1.DeleteOptions{}, framework.DefaultPodDeletionTimeout)
+			f.PodClient().DeleteSync(pod2.Name, &metav1.DeleteOptions{}, framework.DefaultPodDeletionTimeout)
+		})
+
 	})
 })
 

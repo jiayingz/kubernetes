@@ -52,6 +52,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/qos"
 	"k8s.io/kubernetes/pkg/kubelet/status"
+	"k8s.io/kubernetes/pkg/kubelet/util/pluginwatcher"
 	"k8s.io/kubernetes/pkg/scheduler/schedulercache"
 	utilfile "k8s.io/kubernetes/pkg/util/file"
 	"k8s.io/kubernetes/pkg/util/mount"
@@ -606,6 +607,10 @@ func (cm *containerManagerImpl) setFsCapacity() error {
 	}
 	cm.Unlock()
 	return nil
+}
+
+func (cm *containerManagerImpl) GetPluginRegistrationHandlerCbkFunc() pluginwatcher.RegisterCallbackFn {
+	return cm.deviceManager.GetWatcherCallback()
 }
 
 // TODO: move the GetResources logic to PodContainerManager.

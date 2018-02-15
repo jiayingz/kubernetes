@@ -26,6 +26,7 @@ import (
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/status"
+	"k8s.io/kubernetes/pkg/kubelet/util/pluginwatcher"
 	"k8s.io/kubernetes/pkg/scheduler/schedulercache"
 )
 
@@ -68,6 +69,10 @@ func (cm *containerManagerStub) GetNodeAllocatableReservation() v1.ResourceList 
 
 func (cm *containerManagerStub) GetCapacity() v1.ResourceList {
 	return nil
+}
+
+func (cm *containerManagerStub) GetPluginRegistrationHandlerCbkFunc() pluginwatcher.RegisterCallbackFn {
+	return func(name string, versions []string, sockPath string) error { return nil }
 }
 
 func (cm *containerManagerStub) GetDevicePluginResourceCapacity() (v1.ResourceList, v1.ResourceList, []string) {

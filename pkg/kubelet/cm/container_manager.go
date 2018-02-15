@@ -28,6 +28,7 @@ import (
 	evictionapi "k8s.io/kubernetes/pkg/kubelet/eviction/api"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/status"
+	"k8s.io/kubernetes/pkg/kubelet/util/pluginwatcher"
 	"k8s.io/kubernetes/pkg/scheduler/schedulercache"
 
 	"fmt"
@@ -91,6 +92,8 @@ type ContainerManager interface {
 	UpdatePluginResources(*schedulercache.NodeInfo, *lifecycle.PodAdmitAttributes) error
 
 	InternalContainerLifecycle() InternalContainerLifecycle
+
+	GetPluginRegistrationHandlerCbkFunc() pluginwatcher.RegisterCallbackFn
 }
 
 type NodeConfig struct {

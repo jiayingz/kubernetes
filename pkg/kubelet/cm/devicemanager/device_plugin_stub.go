@@ -17,6 +17,7 @@ limitations under the License.
 package devicemanager
 
 import (
+	"io"
 	"log"
 	"net"
 	"os"
@@ -27,12 +28,15 @@ import (
 	"google.golang.org/grpc"
 
 	pluginapi "k8s.io/kubernetes/pkg/kubelet/apis/deviceplugin/v1alpha"
+	watcherapi "k8s.io/kubernetes/pkg/kubelet/apis/pluginregistration/v1alpha"
+	//"k8s.io/kubernetes/pkg/kubelet/util/pluginwatcher"
 )
 
 // Stub implementation for DevicePlugin.
 type Stub struct {
-	devs   []*pluginapi.Device
-	socket string
+	devs         []*pluginapi.Device
+	socket       string
+	resourceName string
 
 	stop   chan interface{}
 	update chan []*pluginapi.Device
@@ -53,10 +57,11 @@ func defaultAllocFunc(r *pluginapi.AllocateRequest, devs map[string]pluginapi.De
 }
 
 // NewDevicePluginStub returns an initialized DevicePlugin Stub.
-func NewDevicePluginStub(devs []*pluginapi.Device, socket string) *Stub {
+func NewDevicePluginStub(devs []*pluginapi.Device, socket string, name string) *Stub {
 	return &Stub{
-		devs:   devs,
-		socket: socket,
+		devs:         devs,
+		socket:       socket,
+		resourceName: name,
 
 		stop:   make(chan interface{}),
 		update: make(chan []*pluginapi.Device),
@@ -84,6 +89,7 @@ func (m *Stub) Start() error {
 
 	m.server = grpc.NewServer([]grpc.ServerOption{}...)
 	pluginapi.RegisterDevicePluginServer(m.server, m)
+	watcherapi.RegisterRegistrationServer(m.server, m)
 
 	go m.server.Serve(sock)
 	_, conn, err := dial(m.socket)
@@ -102,6 +108,43 @@ func (m *Stub) Stop() error {
 	close(m.stop)
 
 	return m.cleanup()
+}
+
+// GetInfo is the RPC which return pluginInfo
+func (m *Stub) GetInfo(stream watcherapi.Registration_GetInfoServer) error {
+	log.Println("GetInfo")
+	info := watcherapi.PluginInfo{
+		Type:    watcherapi.DevicePlugin,
+		Name:    m.resourceName,
+		Version: []string{pluginapi.Version},
+	}
+	err := stream.Send(&info)
+	if err != nil {
+		log.Println("error sending plugin info: ", err)
+	}
+
+	for {
+		s, err := stream.Recv()
+		log.Println("Got ", s)
+		if err == io.EOF {
+			log.Println("Breaking err ", err)
+			break
+		}
+		if err != nil {
+			log.Println("Received err ", err)
+			return err
+		}
+		if s.PluginRegistered {
+			log.Println("Registration success!!")
+			break
+		}
+		if s.Error != "" {
+			log.Println(s.Error)
+			break
+		}
+	}
+
+	return nil
 }
 
 // Register registers the device plugin for the given resourceName with Kubelet.

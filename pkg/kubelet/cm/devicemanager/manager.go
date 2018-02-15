@@ -37,6 +37,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/config"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
+	watcher "k8s.io/kubernetes/pkg/kubelet/util/pluginwatcher"
 	utilstore "k8s.io/kubernetes/pkg/kubelet/util/store"
 	"k8s.io/kubernetes/pkg/scheduler/schedulercache"
 	utilfs "k8s.io/kubernetes/pkg/util/filesystem"
@@ -52,8 +53,9 @@ type monitorCallback func(resourceName string, added, updated, deleted []plugina
 
 // ManagerImpl is the structure in charge of managing Device Plugins.
 type ManagerImpl struct {
-	socketname string
-	socketdir  string
+	socketname          string
+	socketdir           string
+	socketdirUnderProbe string
 
 	endpoints map[string]endpoint // Key is ResourceName
 	mutex     sync.Mutex
@@ -236,6 +238,32 @@ func (m *ManagerImpl) Start(activePods ActivePodsFunc, sourcesReady config.Sourc
 	return nil
 }
 
+// GetWatcherCallback returns callback function to be registered with plugin watcher
+func (m *ManagerImpl) GetWatcherCallback() watcher.RegisterCallbackFn {
+	return func(name string, versions []string, sockPath string) error {
+		if !m.isVersionCompatibleWithPlugin(versions) {
+			return fmt.Errorf("manager version, %s, is not among plugin supported versions %v", pluginapi.Version, versions)
+		}
+
+		if !v1helper.IsExtendedResourceName(v1.ResourceName(name)) {
+			errorString := fmt.Sprintf(errInvalidResourceName, name)
+			return fmt.Errorf("invalid name of device plugin socket: %v", errorString)
+		}
+
+		go m.addEndpoint(name, sockPath)
+		return nil
+	}
+}
+
+func (m *ManagerImpl) isVersionCompatibleWithPlugin(versions []string) bool {
+	for _, version := range versions {
+		if version == pluginapi.Version {
+			return true
+		}
+	}
+	return false
+}
+
 // Devices is the map of devices that are known by the Device
 // Plugin manager with the kind of the devices as key
 func (m *ManagerImpl) Devices() map[string][]pluginapi.Device {
@@ -302,7 +330,7 @@ func (m *ManagerImpl) Register(ctx context.Context, r *pluginapi.RegisterRequest
 	// add some policies here, e.g., verify whether an old device plugin with the
 	// same resource name is still alive to determine whether we want to accept
 	// the new registration.
-	go m.addEndpoint(r)
+	go m.addEndpoint(r.ResourceName, filepath.Join(m.socketdir, r.Endpoint))
 
 	return &pluginapi.Empty{}, nil
 }
@@ -319,10 +347,10 @@ func (m *ManagerImpl) Stop() error {
 	return nil
 }
 
-func (m *ManagerImpl) addEndpoint(r *pluginapi.RegisterRequest) {
+func (m *ManagerImpl) addEndpoint(resourceName string, socketPath string) {
 	existingDevs := make(map[string]pluginapi.Device)
 	m.mutex.Lock()
-	old, ok := m.endpoints[r.ResourceName]
+	old, ok := m.endpoints[resourceName]
 	if ok && old != nil {
 		// Pass devices of previous endpoint into re-registered one,
 		// to avoid potential orphaned devices upon re-registration
@@ -334,10 +362,9 @@ func (m *ManagerImpl) addEndpoint(r *pluginapi.RegisterRequest) {
 	}
 	m.mutex.Unlock()
 
-	socketPath := filepath.Join(m.socketdir, r.Endpoint)
-	e, err := newEndpointImpl(socketPath, r.ResourceName, existingDevs, m.callback)
+	e, err := newEndpointImpl(socketPath, resourceName, existingDevs, m.callback)
 	if err != nil {
-		glog.Errorf("Failed to dial device plugin with request %v: %v", r, err)
+		glog.Errorf("Failed to dial device plugin with socketPath %s: %v", socketPath, err)
 		return
 	}
 
@@ -345,7 +372,7 @@ func (m *ManagerImpl) addEndpoint(r *pluginapi.RegisterRequest) {
 	// Check for potential re-registration during the initialization of new endpoint,
 	// and skip updating if re-registration happens.
 	// TODO: simplify the part once we have a better way to handle registered devices
-	ext := m.endpoints[r.ResourceName]
+	ext := m.endpoints[resourceName]
 	if ext != old {
 		glog.Warningf("Some other endpoint %v is added while endpoint %v is initialized", ext, e)
 		m.mutex.Unlock()
@@ -354,7 +381,7 @@ func (m *ManagerImpl) addEndpoint(r *pluginapi.RegisterRequest) {
 	}
 	// Associates the newly created endpoint with the corresponding resource name.
 	// Stops existing endpoint if there is any.
-	m.endpoints[r.ResourceName] = e
+	m.endpoints[resourceName] = e
 	glog.V(2).Infof("Registered endpoint %v", e)
 	m.mutex.Unlock()
 
@@ -367,9 +394,9 @@ func (m *ManagerImpl) addEndpoint(r *pluginapi.RegisterRequest) {
 		e.stop()
 
 		m.mutex.Lock()
-		if old, ok := m.endpoints[r.ResourceName]; ok && old == e {
+		if old, ok := m.endpoints[resourceName]; ok && old == e {
 			glog.V(2).Infof("Delete resource for endpoint %v", e)
-			delete(m.endpoints, r.ResourceName)
+			delete(m.endpoints, resourceName)
 		}
 
 		glog.V(2).Infof("Unregistered endpoint %v", e)

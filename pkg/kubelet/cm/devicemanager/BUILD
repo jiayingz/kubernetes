@@ -15,10 +15,12 @@ go_library(
     deps = [
         "//pkg/apis/core/v1/helper:go_default_library",
         "//pkg/kubelet/apis/deviceplugin/v1alpha:go_default_library",
+        "//pkg/kubelet/apis/pluginregistration/v1alpha:go_default_library",
         "//pkg/kubelet/config:go_default_library",
         "//pkg/kubelet/container:go_default_library",
         "//pkg/kubelet/lifecycle:go_default_library",
         "//pkg/kubelet/metrics:go_default_library",
+        "//pkg/kubelet/util/pluginwatcher:go_default_library",
         "//pkg/kubelet/util/store:go_default_library",
         "//pkg/scheduler/schedulercache:go_default_library",
         "//pkg/util/filesystem:go_default_library",
@@ -41,7 +43,9 @@ go_test(
     importpath = "k8s.io/kubernetes/pkg/kubelet/cm/devicemanager",
     deps = [
         "//pkg/kubelet/apis/deviceplugin/v1alpha:go_default_library",
+        "//pkg/kubelet/apis/pluginregistration/v1alpha:go_default_library",
         "//pkg/kubelet/lifecycle:go_default_library",
+        "//pkg/kubelet/util/pluginwatcher:go_default_library",
         "//pkg/kubelet/util/store:go_default_library",
         "//pkg/scheduler/schedulercache:go_default_library",
         "//pkg/util/filesystem:go_default_library",
