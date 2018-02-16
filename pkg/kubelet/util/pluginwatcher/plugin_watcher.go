@@ -95,6 +95,7 @@ func (w *Watcher) init() error {
 }
 
 func (w *Watcher) registerPlugin(socketPath string) error {
+	glog.V(2).Infof("registerPlugin called for socketPath: %s", socketPath)
 	client, conn, err := dial(socketPath)
 	if err != nil {
 		glog.Warningf("Dial failed at socket %s, err: %v", socketPath, err)
@@ -103,18 +104,16 @@ func (w *Watcher) registerPlugin(socketPath string) error {
 	defer conn.Close()
 	stream, err := client.GetInfo(context.Background())
 	if err != nil {
+		glog.Errorf("Failed to start GetInfo grpc stream at socket %s, err: %v", socketPath, err)
 		return err
 	}
 	defer stream.CloseSend()
-	resp := new(watcherapi.RegistrationStatus)
-	// Sends an empty stream request to initialize handshaking
-	if err := stream.Send(resp); err != nil {
-		return err
-	}
 	rqst, err := stream.Recv()
 	if err != nil {
+		glog.Errorf("Failed to receive stream at socket %s, err: %v", socketPath, err)
 		return err
 	}
+	resp := new(watcherapi.RegistrationStatus)
 	if handlerCbkFn, ok := w.handlers[rqst.Type]; ok {
 		var versions []string
 		for _, version := range rqst.Version {
@@ -132,17 +131,23 @@ func (w *Watcher) registerPlugin(socketPath string) error {
 		resp.Error = fmt.Sprintf("No handler found registered for plugin type: %s, socket: %s", rqst.Type, socketPath)
 	}
 	if err := stream.Send(resp); err != nil {
+		glog.Errorf("Failed to send registration status at socket %s, err: %v", socketPath, err)
 		return err
 	}
+
 	for {
 		_, err := stream.Recv()
 		if err == io.EOF {
 			break
-		}
-		if err != nil {
+		} else if err != nil {
 			glog.Errorf("Recv failed. err: %v", err)
 			return err
 		}
+	}
+
+	if !resp.PluginRegistered {
+		glog.Errorf("Registration failed for plugin type: %s, name: %s, socket: %s, err: %s", rqst.Type, rqst.Name, socketPath, resp.Error)
+		return fmt.Errorf("%s", resp.Error)
 	}
 	glog.Infof("Successfully registered plugin for plugin type: %s, name: %s, socket: %s", rqst.Type, rqst.Name, socketPath)
 	return nil
