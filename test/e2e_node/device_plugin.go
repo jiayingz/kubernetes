@@ -133,17 +133,12 @@ var _ = framework.KubeDescribe("Device Plugin [Feature:DevicePlugin] [Serial]", 
 			err = dp1.Stop()
 			framework.ExpectNoError(err)
 
-			By("Waiting for stub device plugin to become unavailable on the local node")
-			Eventually(func() bool {
-				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
-				framework.ExpectNoError(err)
-				return numberOfDevicesCapacity(node, resourceName) <= 0
-			}, 10*time.Minute, framework.Poll).Should(BeTrue())
+			By("Waiting for stub device plugin to become unhealthy on the local node")
 			Eventually(func() int64 {
 				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
 				framework.ExpectNoError(err)
 				return numberOfDevicesAllocatable(node, resourceName)
-			}, 10*time.Second, framework.Poll).Should(Equal(int64(0)))
+			}, 30*time.Second, framework.Poll).Should(Equal(int64(0)))
 
 			By("Checking that scheduled pods can continue to run even after we delete device plugin.")
 			count1, devIdRestart1 = parseLogFromNRuns(f, pod1.Name, pod1.Name, count1+1, deviceIDRE)
@@ -151,8 +146,37 @@ var _ = framework.KubeDescribe("Device Plugin [Feature:DevicePlugin] [Serial]", 
 			count2, devIdRestart2 := parseLogFromNRuns(f, pod2.Name, pod2.Name, count2+1, deviceIDRE)
 			Expect(devIdRestart2).To(Equal(devId2))
 
+			By("Re-register resources")
+			dp1 = dm.NewDevicePluginStub(devs, socketPath)
+			dp1.SetAllocFunc(stubAllocFunc)
+			err = dp1.Start()
+			framework.ExpectNoError(err)
+
+			err = dp1.Register(pluginapi.KubeletSocket, resourceName, false)
+			framework.ExpectNoError(err)
+
+			By("Waiting for the resource exported by the stub device plugin to become healthy on the local node")
+			Eventually(func() int64 {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				return numberOfDevicesAllocatable(node, resourceName)
+			}, 30*time.Second, framework.Poll).Should(Equal(devsLen))
+
+			By("Deleting device plugin again.")
+			err = dp1.Stop()
+			framework.ExpectNoError(err)
+
+			By("Waiting for stub device plugin to become unavailable on the local node")
+			Eventually(func() bool {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				return numberOfDevicesCapacity(node, resourceName) <= 0
+			}, 10*time.Minute, framework.Poll).Should(BeTrue())
+
 			By("Restarting Kubelet.")
 			restartKubelet()
+
+			//time.Sleep(15 * time.Second)
 
 			By("Checking that scheduled pods can continue to run even after we delete device plugin and restart Kubelet.")
 			count1, devIdRestart1 = parseLogFromNRuns(f, pod1.Name, pod1.Name, count1+2, deviceIDRE)
@@ -211,7 +235,7 @@ func parseLogFromNRuns(f *framework.Framework, podName string, contName string, 
 		framework.Failf("GetPodLogs for pod %q failed: %v", podName, err)
 	}
 
-	framework.Logf("got pod logs: %v", logs)
+	framework.Logf("got pod logs: %v count %d restartCount %d", logs, count, restartCount)
 	regex := regexp.MustCompile(re)
 	matches := regex.FindStringSubmatch(logs)
 	if len(matches) < 2 {
