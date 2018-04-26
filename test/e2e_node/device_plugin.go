@@ -72,7 +72,12 @@ var _ = framework.KubeDescribe("Device Plugin [Feature:DevicePlugin] [Serial]", 
 			Eventually(func() int64 {
 				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
 				framework.ExpectNoError(err)
-				return numberOfDevices(node, resourceName)
+				return numberOfDevicesCapacity(node, resourceName)
+			}, 30*time.Second, framework.Poll).Should(Equal(devsLen))
+			Eventually(func() int64 {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				return numberOfDevicesAllocatable(node, resourceName)
 			}, 30*time.Second, framework.Poll).Should(Equal(devsLen))
 
 			By("Creating one pod on node with at least one fake-device")
@@ -108,7 +113,12 @@ var _ = framework.KubeDescribe("Device Plugin [Feature:DevicePlugin] [Serial]", 
 			Eventually(func() int64 {
 				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
 				framework.ExpectNoError(err)
-				return numberOfDevices(node, resourceName)
+				return numberOfDevicesCapacity(node, resourceName)
+			}, 30*time.Second, framework.Poll).Should(Equal(devsLen))
+			Eventually(func() int64 {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				return numberOfDevicesAllocatable(node, resourceName)
 			}, 30*time.Second, framework.Poll).Should(Equal(devsLen))
 
 			By("Creating another pod")
@@ -127,8 +137,13 @@ var _ = framework.KubeDescribe("Device Plugin [Feature:DevicePlugin] [Serial]", 
 			Eventually(func() bool {
 				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
 				framework.ExpectNoError(err)
-				return numberOfDevices(node, resourceName) <= 0
+				return numberOfDevicesCapacity(node, resourceName) <= 0
 			}, 10*time.Minute, framework.Poll).Should(BeTrue())
+			Eventually(func() int64 {
+				node, err := f.ClientSet.CoreV1().Nodes().Get(framework.TestContext.NodeName, metav1.GetOptions{})
+				framework.ExpectNoError(err)
+				return numberOfDevicesAllocatable(node, resourceName)
+			}, 10*time.Second, framework.Poll).Should(Equal(int64(0)))
 
 			By("Checking that scheduled pods can continue to run even after we delete device plugin.")
 			count1, devIdRestart1 = parseLogFromNRuns(f, pod1.Name, pod1.Name, count1+1, deviceIDRE)
@@ -206,9 +221,19 @@ func parseLogFromNRuns(f *framework.Framework, podName string, contName string, 
 	return count, matches[1]
 }
 
-// numberOfDevices returns the number of devices of resourceName advertised by a node
-func numberOfDevices(node *v1.Node, resourceName string) int64 {
+// numberOfDevicesCapacity returns the number of devices of resourceName advertised by a node capacity
+func numberOfDevicesCapacity(node *v1.Node, resourceName string) int64 {
 	val, ok := node.Status.Capacity[v1.ResourceName(resourceName)]
+	if !ok {
+		return 0
+	}
+
+	return val.Value()
+}
+
+// numberOfDevicesAllocatable returns the number of devices of resourceName advertised by a node allocatable
+func numberOfDevicesAllocatable(node *v1.Node, resourceName string) int64 {
+	val, ok := node.Status.Allocatable[v1.ResourceName(resourceName)]
 	if !ok {
 		return 0
 	}
