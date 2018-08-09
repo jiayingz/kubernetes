@@ -75,6 +75,18 @@ type NodeInfo struct {
 	// Whenever NodeInfo changes, generation is bumped.
 	// This is used to avoid cloning it if the object didn't change.
 	generation int64
+
+	// Maps from ComputeResource ID to computeResourceInfo
+	computeResources map[string]computeResourceInfo
+}
+
+
+type computeResourceInfo struct {
+	resourceName string
+	properties map[string]string
+	allocatable int32
+	// contains names of all of matching ResourceClasses.
+        matchingResourceClasses []string
 }
 
 //initializeNodeTransientInfo initializes transient information pertaining to node.
@@ -456,6 +468,16 @@ func (n *NodeInfo) AddPod(pod *v1.Pod) {
 	if hasPodAffinityConstraints(pod) {
 		n.podsWithAffinity = append(n.podsWithAffinity, pod)
 	}
+	for rcName, alloc := range pod.Spec.AllocatedComputeResources {
+		// alloc contains list of ComputeResource ID and allocated quant.
+		for id, quant := range alloc {
+			for _, otherMatches := n.computeResources[id].matchingResourceClasses {
+				if otherMatches != rcName {
+					n.requestedResource.ScalarResources[rName] += quant
+				}
+			}
+		}
+	}
 
 	// Consume ports when pods added.
 	n.updateUsedPorts(pod, true)
@@ -563,6 +585,11 @@ func (n *NodeInfo) SetNode(node *v1.Node) error {
 	n.node = node
 
 	n.allocatableResource = NewResource(node.Status.Allocatable)
+	for _, cInfo := range n.computeResources {
+		for _, rc := range cInfo.matchingResourceClasses {
+			n.allocatableResource.ScalarResources[v1.ResourceName(rc)] += cInfo.allocatable
+		}
+	}
 
 	n.taints = node.Spec.Taints
 	for i := range node.Status.Conditions {

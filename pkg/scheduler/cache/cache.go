@@ -386,6 +386,21 @@ func (cache *schedulerCache) GetPod(pod *v1.Pod) (*v1.Pod, error) {
 	return podState.pod, nil
 }
 
+func (cache *schedulerCache) addNodeComputeResources(node *v1.Node, nodeInfo *NodeInfo) {
+	for _, c in range node.Spec.ComputeResources {
+		cInfo := computeResourceInfo{}
+		cInfo.resourceName = c.ResourceName
+		cInfo.properties = c.Properties
+		cInfo.allocatable = len(c.AllocatableDevices)
+		cInfo.matchingResourceClasses = c.findMatchingResourceClasses(c)
+		nodeInfo.computeResources[id] = cInfo
+	}
+}
+
+func (cache *schedulerCache) removeNodeComputeResources(node *v1.Node, nodeInfo *NodeInfo) {
+	nodeInfo.computeResources = make(map[string]computeResourceInfo)
+}
+
 func (cache *schedulerCache) AddNode(node *v1.Node) error {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -394,7 +409,10 @@ func (cache *schedulerCache) AddNode(node *v1.Node) error {
 	if !ok {
 		n = NewNodeInfo()
 		cache.nodes[node.Name] = n
+	} else {
+		cache.removeNodeComputeResources(node, n)
 	}
+	cache.addNodeComputeResources(node, n)
 	return n.SetNode(node)
 }
 
@@ -406,6 +424,8 @@ func (cache *schedulerCache) UpdateNode(oldNode, newNode *v1.Node) error {
 	if !ok {
 		n = NewNodeInfo()
 		cache.nodes[newNode.Name] = n
+	} else {
+		cache.removeNodeComputeResources(node, n)
 	}
 	return n.SetNode(newNode)
 }
