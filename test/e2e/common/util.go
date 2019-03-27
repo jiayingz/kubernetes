@@ -184,3 +184,47 @@ func RestartNodes(c clientset.Interface, nodes []v1.Node) error {
 	}
 	return nil
 }
+
+func RecreateNodes(c clientset.Interface, nodes []v1.Node) error {
+	// Build mapping from zone to nodes in that zone.
+	nodeNamesByZone := make(map[string][]string)
+	for i := range nodes {
+		node := &nodes[i]
+		zone := framework.TestContext.CloudConfig.Zone
+		if z, ok := node.Labels[kubeletapis.LabelZoneFailureDomain]; ok {
+			zone = z
+		}
+		nodeNamesByZone[zone] = append(nodeNamesByZone[zone], node.Name)
+	}
+
+	// Reboot the nodes.
+	for zone, nodeNames := range nodeNamesByZone {
+		args := []string{
+			"compute",
+			fmt.Sprintf("--project=%s", framework.TestContext.CloudConfig.ProjectID),
+			"instances",
+			"recreate",
+		}
+		args = append(args, nodeNames...)
+		args = append(args, fmt.Sprintf("--zone=%s", zone))
+		stdout, stderr, err := framework.RunCmd("gcloud", args...)
+		if err != nil {
+			return fmt.Errorf("error restarting nodes: %s\nstdout: %s\nstderr: %s", err, stdout, stderr)
+		}
+	}
+
+	// Wait for their boot IDs to change.
+	for i := range nodes {
+		node := &nodes[i]
+		if err := wait.Poll(30*time.Second, 5*time.Minute, func() (bool, error) {
+			newNode, err := c.CoreV1().Nodes().Get(node.Name, metav1.GetOptions{})
+			if err != nil {
+				return false, fmt.Errorf("error getting node info after reboot: %s", err)
+			}
+			return node.Status.NodeInfo.BootID != newNode.Status.NodeInfo.BootID, nil
+		}); err != nil {
+			return fmt.Errorf("error waiting for node %s boot ID to change: %s", node.Name, err)
+		}
+	}
+	return nil
+}
